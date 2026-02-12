@@ -134,3 +134,6 @@ const CameraFeed = () => {
 };
 
 export default CameraFeed;
+
+
+//fix pose
