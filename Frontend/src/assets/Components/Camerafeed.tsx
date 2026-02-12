@@ -2,6 +2,7 @@ import { useRef, useEffect, useState } from "react";
 import Webcam from "react-webcam";
 import * as poseDetection from "@tensorflow-models/pose-detection";
 import "@tensorflow/tfjs-backend-webgl";
+import * as tf from "@tensorflow/tfjs";
 
 const CameraFeed = () => {
     const webcamRef = useRef<Webcam>(null);
@@ -21,11 +22,22 @@ const CameraFeed = () => {
     // Pose Detector initialisieren
     useEffect(() => {
         const initDetector = async () => {
-            const detector = await poseDetection.createDetector(
-                poseDetection.SupportedModels.MoveNet,
-                { modelType: poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING }
-            );
-            setDetector(detector);
+
+            try {
+                await tf.setBackend("webgl");
+                await tf.ready();
+                console.log("TF Backend:",tf.getBackend());
+
+                const detector = await poseDetection.createDetector(
+                    poseDetection.SupportedModels.MoveNet,
+                    { modelType: poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING }
+                );
+                console.log("Detector created")
+                setDetector(detector);
+            } catch (error) {
+                console.error("Detection init error", error)
+            }
+
         };
         initDetector();
     }, []);
@@ -44,6 +56,7 @@ const CameraFeed = () => {
             ) {
                 const video = webcamRef.current.video;
                 const poses = await detector.estimatePoses(video);
+                console.log("Poses:", poses);
 
                 // Canvas zeichnen
                 const canvas = canvasRef.current;
@@ -52,6 +65,18 @@ const CameraFeed = () => {
                     if (ctx) {
                         ctx.clearRect(0, 0, canvas.width, canvas.height);
                         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+                        // Linien zwischen Schulter-Elbow-Hand
+                        const drawLine = (p1: any, p2: any, color:string) => {
+                            ctx.beginPath();
+                            ctx.moveTo(p1.x, p1.y);
+                            ctx.lineTo(p2.x, p2.y);
+                            ctx.strokeStyle = color;
+                            ctx.lineWidth = 12;
+                            ctx.lineCap = "round";
+                            ctx.lineJoin = "round";
+                            ctx.stroke();
+                        };
 
                         poses.forEach((pose) => {
                             // Keypoints
@@ -64,42 +89,52 @@ const CameraFeed = () => {
                             const rightWrist = pose.keypoints.find(k => k.name === "right_wrist");
 
                             // Armwinkel
+
+                            //Left arm
                             if (leftShoulder && leftElbow && leftWrist) {
                                 const leftAngle = calculateAngle(leftShoulder, leftElbow, leftWrist);
-                                ctx.fillStyle = "red";
+
+                                const isWrong=leftAngle< 30 || leftAngle > 160;
+                                const color = isWrong ? "red" : "lime";
+
+                                //Angle text
+
+                                ctx.fillStyle = color;
                                 ctx.fillText(`Left: ${Math.round(leftAngle)}°`, leftElbow.x + 5, leftElbow.y - 5);
 
-                                if (leftAngle < 30 || leftAngle > 160) {
-                                    ctx.fillStyle = "red";
-                                    ctx.fillText("Check Form!", leftElbow.x, leftElbow.y + 20);
+                                // Drawing Lines in correct color
+
+                                drawLine(leftShoulder, leftElbow, color);
+                                drawLine(leftElbow, leftWrist, color)
+
+                                if (isWrong){
+                                    ctx.fillText("Check Form", leftElbow.x, leftElbow.y +20);
                                 }
                             }
-
+                                //Right arm
                             if (rightShoulder && rightElbow && rightWrist) {
                                 const rightAngle = calculateAngle(rightShoulder, rightElbow, rightWrist);
-                                ctx.fillStyle = "blue";
+
+                                const isWrong=rightAngle< 30 || rightAngle > 160 ;
+                                const color= isWrong ? "red" : "lime";
+
+                                ctx.fillStyle = color;
                                 ctx.fillText(`Right: ${Math.round(rightAngle)}°`, rightElbow.x + 5, rightElbow.y - 5);
 
-                                if (rightAngle < 30 || rightAngle > 160) {
-                                    ctx.fillStyle = "red";
+                                drawLine(rightShoulder, rightElbow, color);
+                                drawLine(rightElbow,rightWrist, color);
+
+                                if (isWrong){
                                     ctx.fillText("Check Form!", rightElbow.x, rightElbow.y + 20);
                                 }
-                            }
+                                }
 
-                            // Optional: Linien zwischen Schulter-Elbow-Hand
-                            const drawLine = (p1: any, p2: any) => {
-                                ctx.beginPath();
-                                ctx.moveTo(p1.x, p1.y);
-                                ctx.lineTo(p2.x, p2.y);
-                                ctx.strokeStyle = "green";
-                                ctx.lineWidth = 3;
-                                ctx.stroke();
-                            };
 
-                            if (leftShoulder && leftElbow) drawLine(leftShoulder, leftElbow);
-                            if (leftElbow && leftWrist) drawLine(leftElbow, leftWrist);
-                            if (rightShoulder && rightElbow) drawLine(rightShoulder, rightElbow);
-                            if (rightElbow && rightWrist) drawLine(rightElbow, rightWrist);
+
+
+
+
+
                         });
                     }
                 }
@@ -113,27 +148,44 @@ const CameraFeed = () => {
     }, [detector]);
 
     return (
-        <div style={{ position: "relative", width: 640, height: 480 }}>
-            <Webcam
-                ref={webcamRef}
-                audio={false}
-                mirrored
-                width={640}
-                height={480}
-                videoConstraints={{ facingMode: "user" }}
-                style={{ position: "absolute", top: 0, left: 0 }}
-            />
-            <canvas
-                ref={canvasRef}
-                width={640}
-                height={480}
-                style={{ position: "absolute", top: 0, left: 0 }}
-            />
+        <div
+            style={{
+                display: "flex",
+                justifyContent: "center",
+                alignItems: "center",
+                height: "100vh",
+                backgroundColor: "#111" // optional dark background
+            }}
+        >
+            <div
+                style={{
+                    position: "relative",
+                    width: 800,
+                    height: 600
+                }}
+            >
+                <Webcam
+                    ref={webcamRef}
+                    audio={false}
+                    mirrored
+                    width={800}
+                    height={600}
+                    videoConstraints={{ facingMode: "user" }}
+                    style={{ position: "absolute", top: 0, left: 0 }}
+                />
+                <canvas
+                    ref={canvasRef}
+                    width={800}
+                    height={600}
+                    style={{ position: "absolute", top: 0, left: 0 }}
+                />
+            </div>
         </div>
     );
+
+
 };
 
 export default CameraFeed;
 
 
-//fix pose
