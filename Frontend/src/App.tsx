@@ -1,16 +1,18 @@
-import { useState } from 'react'
-import reactLogo from './assets/react.svg'
-import viteLogo from '/vite.svg'
-import './App.css'
-import CameraFeed from "./assets/Components/Camerafeed.tsx";
+import { BrowserRouter as Router, Routes, Route } from "react-router-dom";
+import HomePage from "./assets/Components/HomePage";
+import CameraFeed from "./assets/Components/Camerafeed";
+import LoginPage from "./assets/Components/LoginPage";
 
 function App() {
     return (
-        <div>
-            <h1>Pose Detection – Test</h1>
-            <CameraFeed />
-        </div>
+        <Router>
+            <Routes>
+                <Route path="/" element={<LoginPage />} />
+                <Route path="/home" element={<HomePage />} />
+                <Route path="/curls" element={<CameraFeed />} />
+            </Routes>
+        </Router>
     );
 }
 
-export default App
+export default App;
