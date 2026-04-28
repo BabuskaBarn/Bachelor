@@ -1,11 +1,64 @@
-// CameraFeed.tsx
+// CameraFeed.tsx - MIT ALLEN ÄNDERUNGEN HIGHLIGHTED
 import { useRef, useEffect, useState } from "react";
 import Webcam from "react-webcam";
 import * as poseDetection from "@tensorflow-models/pose-detection";
 import type { Keypoint } from "@tensorflow-models/pose-detection";
 import "@tensorflow/tfjs-backend-webgl";
 import * as tf from "@tensorflow/tfjs";
-import { CurlTracker, type ViewMode, type ArmFeedback } from "./CurlTracker";
+//  SessionStats importiert
+import { CurlTracker, type ViewMode, type ArmFeedback, type SessionStats } from "./CurlTracker";
+
+//  Backend API Service
+const BACKEND_API_URL = "http://localhost:8080/api/sessions";
+
+// Funktion zum Senden der Session-Daten ans Backend
+async function sendSessionToBackend(stats: SessionStats, userId: string): Promise<boolean> {
+    try {
+        const response = await fetch(BACKEND_API_URL, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                userId: userId,
+                timestamp: new Date().toISOString(),
+                sessionData: {
+                    leftReps: stats.leftReps,
+                    rightReps: stats.rightReps,
+                    totalReps: stats.totalReps,
+                    startTime: stats.sessionStartTime,
+                    endTime: stats.sessionEndTime,
+                    duration: stats.sessionEndTime && stats.sessionStartTime
+                        ? (stats.sessionEndTime - stats.sessionStartTime) / 1000
+                        : null,
+                    repRecords: stats.repRecords.map(record => ({
+                        ...record,
+                        raiseTime: record.raiseTime,
+                        lowerTime: record.lowerTime,
+                        timestamp: new Date(record.timestamp).toISOString(),
+                    })),
+                    errors: {
+                        left: stats.leftErrors,
+                        right: stats.rightErrors,
+                        universal: stats.universalErrors
+                    }
+                }
+            })
+        });
+
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
+        const result = await response.json();
+        console.log('Session saved to backend:', result);
+        return true;
+    } catch (error) {
+        console.error('Error sending session to backend:', error);
+        return false;
+    }
+}
+
 const CameraFeed = () => {
     const webcamRef = useRef<Webcam>(null);
     const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -24,10 +77,22 @@ const CameraFeed = () => {
     const [error, setError] = useState<string | null>(null);
     const [webcamReady, setWebcamReady] = useState(false);
 
-    const mirrored = true;
-    const curlTracker = useRef(new CurlTracker()).current; // ← FIXED: curlTracker (nicht curlTrakcer)
+    //  Session Stats States
+    const [sessionStats, setSessionStats] = useState<SessionStats | null>(null);
+    const [showStats, setShowStats] = useState(false);
+    const [isSending, setIsSending] = useState(false);
+    const [sendSuccess, setSendSuccess] = useState<boolean | null>(null);
 
-    // Pose Detector initialisieren
+    //  Elbow Forward Errors State
+    const [elbowForwardErrors, setElbowForwardErrors] = useState<{ left: boolean; right: boolean }>({
+        left: false,
+        right: false,
+    });
+
+    const mirrored = true;
+    const curlTracker = useRef(new CurlTracker()).current;
+
+    // Pose Detector initialisieren (UNVERÄNDERT)
     useEffect(() => {
         let localDetector: poseDetection.PoseDetector | null = null;
         let mounted = true;
@@ -75,14 +140,40 @@ const CameraFeed = () => {
         };
     }, []);
 
-    // Reset rep states when view mode changes
+    // Reset when view mode changes (: mit session check)
     useEffect(() => {
-        if (curlTracker) {
-            curlTracker.resetRepStates(); // ← FIXED: curlTracker
+        if (curlTracker && !curlTracker.isSessionActive()) {
+            curlTracker.resetRepStates();
         }
     }, [viewMode, curlTracker]);
 
-    // Webcam Ready Handler
+    //  Session Handler
+    const handleStartSession = () => {
+        curlTracker.startSession();
+        setSessionStats(null);
+        setShowStats(false);
+        setSendSuccess(null);
+    };
+
+    //  End Session mit Backend-Send
+    const handleEndSession = async () => {
+        const stats = curlTracker.endSession();
+        setSessionStats(stats);
+        setShowStats(true);
+
+        setIsSending(true);
+        const userId = localStorage.getItem("userId") || "anonymous-user";
+        const success = await sendSessionToBackend(stats, userId);
+        setIsSending(false);
+        setSendSuccess(success);
+
+        if (success) {
+            console.log("Session data successfully saved to backend!");
+        } else {
+            console.warn("Failed to save session data to backend");
+        }
+    };
+
     const handleWebcamReady = () => {
         console.log("Webcam is ready");
         setWebcamReady(true);
@@ -143,9 +234,29 @@ const CameraFeed = () => {
                     };
 
                     if (poses.length > 0 && poses[0].keypoints) {
-                        const result = curlTracker.analyzePose(poses[0], viewMode, mirrored); // ← FIXED: curlTracker
+                        const result = curlTracker.analyzePose(poses[0], viewMode, mirrored);
                         setArmFeedback(result.feedback);
                         setAngles(result.angles);
+
+                        // elbowForwardErrors setzen
+                        setElbowForwardErrors(result.elbowForwardErrors);
+
+                        //Backswing Linie (nur bei Backswing, mit Label)
+                        if (viewMode === "side" && result.backSwingData.centerLine) {
+                            const { start, end } = result.backSwingData.centerLine;
+                            ctx.beginPath();
+                            ctx.moveTo(mapX(start.x), mapY(start.y));
+                            ctx.lineTo(mapX(end.x), mapY(end.y));
+                            ctx.strokeStyle = "orange";
+                            ctx.lineWidth = 8;
+                            ctx.setLineDash([10, 10]);
+                            ctx.stroke();
+                            ctx.setLineDash([]);
+
+                            ctx.fillStyle = "orange";
+                            ctx.font = "14px Arial";
+                            ctx.fillText("⚠ Backswing", mapX((start.x + end.x) / 2), mapY((start.y + end.y) / 2) - 10);
+                        }
 
                         const pose = poses[0];
                         const leftShoulder = pose.keypoints.find((k) => k.name === "left_shoulder");
@@ -157,7 +268,7 @@ const CameraFeed = () => {
 
                         let sideArm: "left" | "right" | null = null;
                         if (viewMode === "side") {
-                            sideArm = curlTracker.getSideArm( // ← FIXED: curlTracker
+                            sideArm = curlTracker.getSideArm(
                                 leftShoulder,
                                 leftElbow,
                                 leftWrist,
@@ -167,7 +278,7 @@ const CameraFeed = () => {
                             );
                         }
 
-                        // Draw left arm
+                        //  Draw left arm mit elbowForwardError
                         const leftOk =
                             leftShoulder &&
                             leftElbow &&
@@ -176,7 +287,9 @@ const CameraFeed = () => {
 
                         if (leftOk) {
                             const leftAngle = result.angles.left;
-                            const isWrong = (leftAngle !== null && leftAngle < 30) || (leftAngle !== null && leftAngle > 170);
+                            // elbowForwardError macht Linie rot
+                            const hasElbowError = viewMode === "side" && result.elbowForwardErrors.left;
+                            const isWrong = (leftAngle !== null && leftAngle < 30) || (leftAngle !== null && leftAngle > 170) || hasElbowError;
                             const color = isWrong ? "red" : "lime";
 
                             if (leftAngle !== null) {
@@ -192,7 +305,7 @@ const CameraFeed = () => {
                             drawLine(leftElbow!, leftWrist!, color);
                         }
 
-                        // Draw right arm
+                        //  Draw right arm mit elbowForwardError
                         const rightOk =
                             rightShoulder &&
                             rightElbow &&
@@ -201,7 +314,9 @@ const CameraFeed = () => {
 
                         if (rightOk) {
                             const rightAngle = result.angles.right;
-                            const isWrong = (rightAngle !== null && rightAngle < 30) || (rightAngle !== null && rightAngle > 170);
+                            // elbowForwardError macht Linie rot
+                            const hasElbowError = viewMode === "side" && result.elbowForwardErrors.right;
+                            const isWrong = (rightAngle !== null && rightAngle < 30) || (rightAngle !== null && rightAngle > 170) || hasElbowError;
                             const color = isWrong ? "red" : "lime";
 
                             if (rightAngle !== null) {
@@ -219,7 +334,22 @@ const CameraFeed = () => {
 
                         if (viewMode === "side" && sideArm) {
                             ctx.fillStyle = "yellow";
+                            ctx.font = "16px Arial";
                             ctx.fillText(`Tracking: ${sideArm} arm`, 20, 25);
+                        }
+
+                        // Display rep counts during session
+                        if (curlTracker.isSessionActive()) {
+                            const repCounts = curlTracker.getDisplayRepCount(viewMode);
+                            ctx.fillStyle = "white";
+                            ctx.font = "bold 20px Arial";
+
+                            if (viewMode === "side" && sideArm) {
+                                const activeReps = sideArm === "left" ? repCounts.left : repCounts.right;
+                                ctx.fillText(`Reps (${sideArm}): ${activeReps}`, 20, 60);
+                            } else {
+                                ctx.fillText(`Left: ${repCounts.left}  Right: ${repCounts.right}  Total: ${repCounts.total}`, 20, 60);
+                            }
                         }
                     } else {
                         ctx.fillStyle = "white";
@@ -244,7 +374,6 @@ const CameraFeed = () => {
         };
     }, [detector, mirrored, viewMode, curlTracker, webcamReady]);
 
-    // ... Rest des JSX bleibt gleich
     if (error) {
         return (
             <div style={{
@@ -310,6 +439,112 @@ const CameraFeed = () => {
                 Mode wechseln
             </button>
 
+            {/* Session Control Buttons */}
+            <div style={{ display: "flex", gap: "12px", marginBottom: "12px" }}>
+                {!curlTracker.isSessionActive() ? (
+                    <button
+                        onClick={handleStartSession}
+                        style={{
+                            padding: "10px 20px",
+                            fontSize: 16,
+                            cursor: "pointer",
+                            backgroundColor: "#4CAF50",
+                            color: "white",
+                            border: "none",
+                            borderRadius: "5px"
+                        }}
+                    >
+                        Start Session
+                    </button>
+                ) : (
+                    <button
+                        onClick={handleEndSession}
+                        style={{
+                            padding: "10px 20px",
+                            fontSize: 16,
+                            cursor: "pointer",
+                            backgroundColor: "#f44336",
+                            color: "white",
+                            border: "none",
+                            borderRadius: "5px"
+                        }}
+                    >
+                        End Session
+                    </button>
+                )}
+            </div>
+
+            {/*  Session Status Anzeige */}
+            {curlTracker.isSessionActive() && (
+                <div style={{ color: "#4CAF50", marginBottom: 10, fontWeight: "bold" }}>
+                     SESSION ACTIVE - Tracking started
+                </div>
+            )}
+
+            {/* Sending Status */}
+            {isSending && (
+                <div style={{ color: "yellow", marginBottom: 10 }}>
+                    Sending session data to backend...
+                </div>
+            )}
+
+            {sendSuccess === true && (
+                <div style={{ color: "#4CAF50", marginBottom: 10 }}>
+                    ✓ Session data successfully saved!
+                </div>
+            )}
+
+            {sendSuccess === false && (
+                <div style={{ color: "#f44336", marginBottom: 10 }}>
+                    ✗ Failed to save session data. Check console for details.
+                </div>
+            )}
+
+            {/* Session Stats Modal */}
+            {showStats && sessionStats && (
+                <div style={{
+                    position: "fixed",
+                    top: "50%",
+                    left: "50%",
+                    transform: "translate(-50%, -50%)",
+                    backgroundColor: "#333",
+                    color: "white",
+                    padding: "20px",
+                    borderRadius: "10px",
+                    zIndex: 1000,
+                    maxWidth: "500px",
+                    maxHeight: "80vh",
+                    overflowY: "auto"
+                }}>
+                    <h3>Session Statistics</h3>
+                    <p><strong>Left Reps:</strong> {sessionStats.leftReps}</p>
+                    <p><strong>Right Reps:</strong> {sessionStats.rightReps}</p>
+                    <p><strong>Total Reps:</strong> {sessionStats.totalReps}</p>
+                    <p><strong>Duration:</strong> {sessionStats.sessionStartTime && sessionStats.sessionEndTime
+                        ? ((sessionStats.sessionEndTime - sessionStats.sessionStartTime) / 1000).toFixed(1) + "s"
+                        : "N/A"}</p>
+
+                    <h4>Left Arm Errors:</h4>
+                    {sessionStats.leftErrors.length === 0 ? <p>✓ No errors</p> :
+                        sessionStats.leftErrors.map((e, i) => <p key={i}>• {e}</p>)}
+
+                    <h4>Right Arm Errors:</h4>
+                    {sessionStats.rightErrors.length === 0 ? <p>✓ No errors</p> :
+                        sessionStats.rightErrors.map((e, i) => <p key={i}>• {e}</p>)}
+
+                    <h4>Universal Errors:</h4>
+                    {sessionStats.universalErrors.length === 0 ? <p>✓ No errors</p> :
+                        sessionStats.universalErrors.map((e, i) => <p key={i}>• {e}</p>)}
+
+                    <button
+                        onClick={() => setShowStats(false)}
+                        style={{ marginTop: "10px", padding: "8px 16px", cursor: "pointer" }}
+                    >
+                        Close
+                    </button>
+                </div>
+            )}
+
             <div
                 style={{
                     display: "flex",
@@ -317,7 +552,7 @@ const CameraFeed = () => {
                     alignItems: "center",
                 }}
             >
-                {/* LEFT PANEL */}
+                {/* LEFT PANEL - UNVERÄNDERT */}
                 <div
                     style={{
                         width: 260,
@@ -343,7 +578,7 @@ const CameraFeed = () => {
                     ))}
                 </div>
 
-                {/* CAMERA */}
+                {/* CAMERA - UNVERÄNDERT */}
                 <div
                     style={{
                         position: "relative",
@@ -370,7 +605,9 @@ const CameraFeed = () => {
                         onUserMedia={() => handleWebcamReady()}
                         onUserMediaError={(err) => {
                             console.error("Webcam error:", err);
-                            setError(`Webcam access denied or not available: ${err.message}`);
+                            if ("message" in err) {
+                                setError(`Webcam access denied or not available: ${err.message}`);
+                            }
                         }}
                     />
 
@@ -386,7 +623,7 @@ const CameraFeed = () => {
                     />
                 </div>
 
-                {/* RIGHT PANEL */}
+                {/* RIGHT PANEL - UNVERÄNDERT */}
                 <div
                     style={{
                         width: 260,

@@ -1,0 +1,13 @@
+Dokumentation:
+
+The imports for TensorFlow.js import Movenet a PoseDetection system
+
+"Confidence-Treshold":
+Each Keypoint has a score.
+Scores range between 0.0 to 1.0 the higher the score the more the posedetection system is shure that the Keypoints is really in the right place
+the  Treshold itself is just here so that the model ignores bad detectcions.
+
+CameraFeed:
+It is basically the all encompassing method that we use for the model.
+
+mit let können wir eine variable X den Wert 5 geben es später aber auf 10 ändern

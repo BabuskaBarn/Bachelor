@@ -1,4 +1,4 @@
-// CurlTracker.ts
+// CurlTracker.ts - KORRIGIERTE VERSION mit elbowForwardErrors im Return Type
 import type { Keypoint } from "@tensorflow-models/pose-detection";
 
 export type ViewMode = "front" | "side";
@@ -17,6 +17,27 @@ export interface RepState {
     idleStart: number | null;
 }
 
+export interface RepRecord {
+    arm: "left" | "right";
+    repNumber: number;
+    raiseTime: number;
+    lowerTime: number;
+    errors: string[];
+    timestamp: number;
+}
+
+export interface SessionStats {
+    leftReps: number;
+    rightReps: number;
+    totalReps: number;
+    repRecords: RepRecord[];
+    sessionStartTime: number | null;
+    sessionEndTime: number | null;
+    leftErrors: string[];
+    rightErrors: string[];
+    universalErrors: string[];
+}
+
 export const Min_Score = 0.25;
 
 interface TimedMessage {
@@ -32,6 +53,7 @@ export class CurlTracker {
             raiseStart: null as number | null,
             lowerStart: null as number | null,
             idleStart: null as number | null,
+            repCount: 0,
         },
         right: {
             prev: null as { y: number; t: number } | null,
@@ -39,6 +61,7 @@ export class CurlTracker {
             raiseStart: null as number | null,
             lowerStart: null as number | null,
             idleStart: null as number | null,
+            repCount: 0,
         },
     };
 
@@ -53,7 +76,6 @@ export class CurlTracker {
         right_hip: null,
     };
 
-    // Timed messages für automatisches Löschen
     private timedFeedback: {
         left: TimedMessage[];
         right: TimedMessage[];
@@ -64,9 +86,31 @@ export class CurlTracker {
         universal: [],
     };
 
-    private messageTimeoutMs = 150; // 0.15 Sekunden
+    private messageTimeoutMs = 150;
 
-    // Armwinkel berechnen (zwischen Schulter - Ellbogen - Hand)
+    private sessionActive: boolean = false;
+    private sessionStats: SessionStats = {
+        leftReps: 0,
+        rightReps: 0,
+        totalReps: 0,
+        repRecords: [],
+        sessionStartTime: null,
+        sessionEndTime: null,
+        leftErrors: [],
+        rightErrors: [],
+        universalErrors: [],
+    };
+
+    private sessionErrors: {
+        left: Set<string>;
+        right: Set<string>;
+        universal: Set<string>;
+    } = {
+        left: new Set(),
+        right: new Set(),
+        universal: new Set(),
+    };
+
     calculateAngle(a: Keypoint, b: Keypoint, c: Keypoint): number {
         const radians =
             Math.atan2(c.y - b.y, c.x - b.x) -
@@ -76,16 +120,13 @@ export class CurlTracker {
         return angle;
     }
 
-    // Stabilisierung der Keypoints
     getStablePoint(point?: Keypoint): Keypoint | undefined {
         if (!point?.name) return point;
 
         const old = this.stablePointsRef[point.name];
 
-        // guter Punkt → speichern
         if ((point.score ?? 0) > 0.2) {
             if (old) {
-                // leichtes smoothing
                 point = {
                     ...point,
                     x: old.x * 0.7 + point.x * 0.3,
@@ -97,16 +138,15 @@ export class CurlTracker {
             return point;
         }
 
-        // schlechter Punkt → letzten guten benutzen
         return old ?? point;
     }
 
-    // Rep-Erkennung für einen Arm
     updateRepForArm(
         rep: RepState,
         wrist: Keypoint,
         shoulder: Keypoint,
-        hip: Keypoint
+        hip: Keypoint,
+        arm: "left" | "right"
     ): { finishedRep: boolean; raiseTime: number; lowerTime: number; errors: string[] } {
         const now = performance.now();
         let vy = 0;
@@ -128,17 +168,16 @@ export class CurlTracker {
         let lowerTime = 0;
         const errors: string[] = [];
 
-        // init idle start
         if (rep.idleStart == null && rep.state === "idle") {
             rep.idleStart = now;
         }
 
-        // Idle -> Raising
         if (rep.state === "idle" && vy < -V && inLower) {
             const idleTime = rep.idleStart ? (now - rep.idleStart) / 1000 : 0;
 
             if (idleTime < 0.15) {
-                errors.push("Idle phase too short");
+                errors.push(`Idle phase too short (${idleTime.toFixed(2)}s)`);
+                this.addSessionError(arm, `Idle phase too short (${idleTime.toFixed(2)}s)`);
             }
 
             rep.state = "raising";
@@ -146,7 +185,6 @@ export class CurlTracker {
             rep.idleStart = null;
         }
 
-        // Raising -> Idle
         if (rep.state === "raising" && inUpper) {
             raiseTime = rep.raiseStart ? (now - rep.raiseStart) / 1000 : 0;
             rep.state = "idle";
@@ -154,12 +192,12 @@ export class CurlTracker {
             rep.idleStart = now;
         }
 
-        // Idle -> Lowering
         if (rep.state === "idle" && vy > V && inUpper) {
             const idleTime = rep.idleStart ? (now - rep.idleStart) / 1000 : 0;
 
             if (idleTime < 0.15) {
-                errors.push("Idle phase too short");
+                errors.push(`Idle phase too short (${idleTime.toFixed(2)}s)`);
+                this.addSessionError(arm, `Idle phase too short (${idleTime.toFixed(2)}s)`);
             }
 
             rep.state = "lowering";
@@ -167,13 +205,13 @@ export class CurlTracker {
             rep.idleStart = null;
         }
 
-        // Lowering -> Idle
         if (rep.state === "lowering" && inLower) {
             lowerTime = rep.lowerStart ? (now - rep.lowerStart) / 1000 : 0;
             raiseTime = rep.raiseStart ? (rep.lowerStart! - rep.raiseStart) / 1000 : 0;
 
             if (lowerTime < raiseTime * 1.75) {
-                errors.push("Lowering too fast (eccentric too short)");
+                errors.push(`Lowering too fast (${lowerTime.toFixed(2)}s / ${raiseTime.toFixed(2)}s)`);
+                this.addSessionError(arm, `Lowering too fast (${lowerTime.toFixed(2)}s / ${raiseTime.toFixed(2)}s)`);
             }
 
             rep.state = "idle";
@@ -184,40 +222,47 @@ export class CurlTracker {
         return { finishedRep, raiseTime, lowerTime, errors };
     }
 
-    // Hilfsfunktion zum Hinzufügen einer zeitgesteuerten Nachricht
+    private addSessionError(arm: "left" | "right", error: string): void {
+        if (!this.sessionActive) return;
+
+        if (arm === "left") {
+            this.sessionErrors.left.add(error);
+        } else {
+            this.sessionErrors.right.add(error);
+        }
+    }
+
+    addUniversalSessionError(error: string): void {
+        if (!this.sessionActive) return;
+        this.sessionErrors.universal.add(error);
+    }
+
     private addTimedMessage(category: "left" | "right" | "universal", message: string): void {
         const now = performance.now();
         const timedArray = this.timedFeedback[category];
 
-        // Prüfen ob Nachricht bereits existiert
         const existingIndex = timedArray.findIndex(tm => tm.message === message);
         if (existingIndex !== -1) {
-            // Vorhandene Nachricht aktualisieren
             timedArray[existingIndex].timestamp = now;
         } else {
-            // Neue Nachricht hinzufügen
             timedArray.push({ message, timestamp: now });
         }
     }
 
-    // Alte Nachrichten entfernen (älter als messageTimeoutMs)
     private cleanupOldMessages(): void {
         const now = performance.now();
 
         for (const category of ["left", "right", "universal"] as const) {
-            // FIXED: Speichere die gefilterten Nachrichten zurück
             const filtered = this.timedFeedback[category].filter(
                 tm => now - tm.timestamp < this.messageTimeoutMs
             );
 
-            // Nur aktualisieren wenn sich etwas geändert hat
             if (filtered.length !== this.timedFeedback[category].length) {
                 this.timedFeedback[category] = filtered;
             }
         }
     }
 
-    // Aktuelle Feedback-Nachrichten abrufen (nur die, die noch nicht abgelaufen sind)
     private getCurrentFeedback(): ArmFeedback {
         this.cleanupOldMessages();
 
@@ -228,28 +273,20 @@ export class CurlTracker {
         };
     }
 
-    // Prüfen ob sich Wrist und Elbow überlappen (im Frontmodus)
     private isWristAndElbowOverlapping(wrist: Keypoint, elbow: Keypoint, shoulder: Keypoint): boolean {
-        // Berechne Abstand zwischen Wrist und Elbow
         const distance = Math.sqrt(
             Math.pow(wrist.x - elbow.x, 2) +
             Math.pow(wrist.y - elbow.y, 2)
         );
 
-        // Berechne Abstand zwischen Shoulder und Elbow (Armlänge)
         const armLength = Math.sqrt(
             Math.pow(shoulder.x - elbow.x, 2) +
             Math.pow(shoulder.y - elbow.y, 2)
         );
 
-        // Wenn Handgelenk näher am Ellenbogen als 15% der Armlänge, überlappen sie sich
-        // Das ist normal bei gebeugtem Arm (z.B. bei voller Kontraktion)
-        const isOverlapping = distance < armLength * 0.15;
-
-        return isOverlapping;
+        return distance < armLength * 0.15;
     }
 
-    // Push-Nachrichten basierend auf Regeln (entspanntere Version)
     private pushMessages(
         category: "left" | "right" | "universal",
         rules: { condition: boolean; msg: string }[],
@@ -259,16 +296,21 @@ export class CurlTracker {
         for (const rule of rules) {
             if (rule.condition) {
                 this.addTimedMessage(category, rule.msg);
+                if (this.sessionActive) {
+                    if (category === "universal") {
+                        this.sessionErrors.universal.add(rule.msg);
+                    } else {
+                        this.sessionErrors[category].add(rule.msg);
+                    }
+                }
                 hit = true;
             }
         }
-        // Fallback nur wenn keine Regel zutrifft und kein Fallback-String
         if (!hit && fallback) {
             this.addTimedMessage(category, fallback);
         }
     }
 
-    // Backswing Analyse für Side-Modus
     analyzeBackSwing(
         leftShoulder: Keypoint | undefined,
         rightShoulder: Keypoint | undefined,
@@ -279,7 +321,6 @@ export class CurlTracker {
             return { hasBackSwing: false, centerLine: null };
         }
 
-        // Zentrum von Schultern und Hüfte berechnen
         const shoulderCenter = {
             x: (leftShoulder.x + rightShoulder.x) / 2,
             y: (leftShoulder.y + rightShoulder.y) / 2,
@@ -290,31 +331,92 @@ export class CurlTracker {
             y: (leftHip.y + rightHip.y) / 2,
         };
 
-        // Horizontaler Versatz zwischen Schulter- und Hüftzentrum
         const torsoShift = Math.abs(shoulderCenter.x - hipCenter.x);
-
-        // Körperbreite basierend auf Schulterbreite
         const bodyWidth = Math.abs(leftShoulder.x - rightShoulder.x);
-
-        // Backswing wenn der Versatz mehr als 20% der Körperbreite beträgt (entspannter)
         const hasBackSwing = torsoShift > bodyWidth * 0.2;
+
+        if (hasBackSwing && this.sessionActive) {
+            this.sessionErrors.universal.add("Backswing detected - straighten your back");
+        }
 
         return {
             hasBackSwing,
-            centerLine: {
+            centerLine: hasBackSwing ? {
                 start: shoulderCenter,
                 end: hipCenter,
-            },
+            } : null,
         };
     }
 
-    // Analyse der Pose und Generierung von Feedback
+    startSession(): void {
+        this.sessionActive = true;
+        this.sessionStats = {
+            leftReps: 0,
+            rightReps: 0,
+            totalReps: 0,
+            repRecords: [],
+            sessionStartTime: Date.now(),
+            sessionEndTime: null,
+            leftErrors: [],
+            rightErrors: [],
+            universalErrors: [],
+        };
+        this.sessionErrors = {
+            left: new Set(),
+            right: new Set(),
+            universal: new Set(),
+        };
+
+        this.repRef.left.repCount = 0;
+        this.repRef.right.repCount = 0;
+    }
+
+    endSession(): SessionStats {
+        this.sessionActive = false;
+        this.sessionStats.sessionEndTime = Date.now();
+
+        this.sessionStats.leftErrors = Array.from(this.sessionErrors.left);
+        this.sessionStats.rightErrors = Array.from(this.sessionErrors.right);
+        this.sessionStats.universalErrors = Array.from(this.sessionErrors.universal);
+        this.sessionStats.leftReps = this.repRef.left.repCount;
+        this.sessionStats.rightReps = this.repRef.right.repCount;
+        this.sessionStats.totalReps = this.repRef.left.repCount + this.repRef.right.repCount;
+
+        return { ...this.sessionStats };
+    }
+
+    isSessionActive(): boolean {
+        return this.sessionActive;
+    }
+
+    getCurrentSessionStats(): SessionStats {
+        return {
+            ...this.sessionStats,
+            leftReps: this.repRef.left.repCount,
+            rightReps: this.repRef.right.repCount,
+            totalReps: this.repRef.left.repCount + this.repRef.right.repCount,
+        };
+    }
+
+    getDisplayRepCount(viewMode: ViewMode): { left: number; right: number; total: number } {
+        return {
+            left: this.repRef.left.repCount,
+            right: this.repRef.right.repCount,
+            total: this.repRef.left.repCount + this.repRef.right.repCount,
+        };
+    }
+
+    // 🔴 WICHTIG: Hier ist der korrigierte Return Type mit elbowForwardErrors
     analyzePose(
         pose: { keypoints: Keypoint[] },
         viewMode: ViewMode,
         mirrored: boolean
-    ): { feedback: ArmFeedback; angles: { left: number | null; right: number | null }; backSwingData: { hasBackSwing: boolean; centerLine: { start: { x: number; y: number }; end: { x: number; y: number } } | null } } {
-        // Keypoints holen und stabilisieren
+    ): {
+        feedback: ArmFeedback;
+        angles: { left: number | null; right: number | null };
+        backSwingData: { hasBackSwing: boolean; centerLine: { start: { x: number; y: number }; end: { x: number; y: number } } | null };
+        elbowForwardErrors: { left: boolean; right: boolean };  // 🔴 FIXED: Hier war der Fehler!
+    } {
         const leftShoulder = this.getStablePoint(
             pose.keypoints.find((k) => k.name === "left_shoulder")
         );
@@ -342,20 +444,19 @@ export class CurlTracker {
 
         let leftAngle: number | null = null;
         let rightAngle: number | null = null;
+        let leftElbowForwardError = false;
+        let rightElbowForwardError = false;
 
-        // Backswing Analyse für Side-Modus
         let backSwingData = { hasBackSwing: false, centerLine: null as { start: { x: number; y: number }; end: { x: number; y: number } } | null };
 
         if (viewMode === "side") {
             backSwingData = this.analyzeBackSwing(leftShoulder, rightShoulder, leftHip, rightHip);
 
-            // Backswing Fehler anzeigen
             if (backSwingData.hasBackSwing) {
                 this.addTimedMessage("universal", "Straighten back - avoid swinging");
             }
         }
 
-        // Arm visibility (entspanntere Scores)
         const leftOk =
             (leftShoulder?.score ?? 0) > Min_Score * 0.8 &&
             (leftElbow?.score ?? 0) > Min_Score * 0.8 &&
@@ -368,14 +469,27 @@ export class CurlTracker {
             (rightWrist?.score ?? 0) > Min_Score * 0.8 &&
             (rightHip?.score ?? 0) > Min_Score * 0.8;
 
-        // Velocity tracking (entspannter)
         if (leftOk && leftWrist && leftShoulder && leftHip) {
             const resLeft = this.updateRepForArm(
                 this.repRef.left,
                 leftWrist,
                 leftShoulder,
-                leftHip
+                leftHip,
+                "left"
             );
+
+            if (resLeft.finishedRep && this.sessionActive) {
+                this.repRef.left.repCount++;
+                this.sessionStats.repRecords.push({
+                    arm: "left",
+                    repNumber: this.repRef.left.repCount,
+                    raiseTime: resLeft.raiseTime,
+                    lowerTime: resLeft.lowerTime,
+                    errors: resLeft.errors,
+                    timestamp: Date.now(),
+                });
+            }
+
             resLeft.errors.forEach((e) => {
                 this.addTimedMessage("left", e);
                 this.addTimedMessage("universal", `Left: ${e}`);
@@ -387,15 +501,28 @@ export class CurlTracker {
                 this.repRef.right,
                 rightWrist,
                 rightShoulder,
-                rightHip
+                rightHip,
+                "right"
             );
+
+            if (resRight.finishedRep && this.sessionActive) {
+                this.repRef.right.repCount++;
+                this.sessionStats.repRecords.push({
+                    arm: "right",
+                    repNumber: this.repRef.right.repCount,
+                    raiseTime: resRight.raiseTime,
+                    lowerTime: resRight.lowerTime,
+                    errors: resRight.errors,
+                    timestamp: Date.now(),
+                });
+            }
+
             resRight.errors.forEach((e) => {
                 this.addTimedMessage("right", e);
                 this.addTimedMessage("universal", `Right: ${e}`);
             });
         }
 
-        // Automatic detection of right arm during side mode
         let sideArm: "left" | "right" | null = null;
 
         if (viewMode === "side") {
@@ -408,30 +535,34 @@ export class CurlTracker {
             else if (rightOk) sideArm = "right";
         }
 
-        // LEFT ARM Analysis (entspanntere Grenzwerte)
+        // LEFT ARM Analysis mit elbowForwardError
         if (leftOk && (viewMode === "front" || sideArm === "left")) {
             leftAngle = this.calculateAngle(leftShoulder!, leftElbow!, leftWrist!);
 
-            // FIXED: Prüfe auf Überlappung von Wrist und Elbow
             const isOverlapping = this.isWristAndElbowOverlapping(leftWrist!, leftElbow!, leftShoulder!);
 
-            // Nur Fehler anzeigen wenn keine Überlappung besteht
             if (!isOverlapping) {
-                const bodyWidthLeft = Math.abs(leftShoulder!.x - leftHip!.x);
-                const elbowDistanceLeft = Math.abs(leftElbow!.x - leftShoulder!.x);
-                const elbowTooFarLeft = elbowDistanceLeft > bodyWidthLeft * 1.35;
                 const leftWristTooFarUp = leftAngle < 25;
-                const leftAngleTooWide = leftAngle > 175;
 
-                let leftElbowTooFarForward = false;
                 if (viewMode === "side") {
                     const shoulderX = leftShoulder!.x;
                     const elbowX = leftElbow!.x;
                     const forwardDistance = Math.abs(elbowX - shoulderX);
-                    leftElbowTooFarForward = forwardDistance > 50;
+                    leftElbowForwardError = forwardDistance > 50;
+                    if (leftElbowForwardError) {
+                        this.addTimedMessage("left", "Elbow too far forward");
+                        if (this.sessionActive) {
+                            this.sessionErrors.left.add("Elbow too far forward");
+                        }
+                    }
                 }
 
                 if (viewMode === "front") {
+                    const bodyWidthLeft = Math.abs(leftShoulder!.x - leftHip!.x);
+                    const elbowDistanceLeft = Math.abs(leftElbow!.x - leftShoulder!.x);
+                    const elbowTooFarLeft = elbowDistanceLeft > bodyWidthLeft * 1.35;
+                    const leftAngleTooWide = leftAngle > 175;
+
                     this.pushMessages(
                         "left",
                         [
@@ -441,13 +572,10 @@ export class CurlTracker {
                         ],
                         ""
                     );
-                }
-
-                if (viewMode === "side") {
+                } else if (viewMode === "side") {
                     this.pushMessages(
                         "left",
                         [
-                            { condition: leftElbowTooFarForward, msg: "Elbow too far forward" },
                             { condition: leftWristTooFarUp, msg: "Wrist too far up" },
                         ],
                         ""
@@ -456,30 +584,34 @@ export class CurlTracker {
             }
         }
 
-        // RIGHT ARM Analysis (entspanntere Grenzwerte)
+        // RIGHT ARM Analysis mit elbowForwardError
         if (rightOk && (viewMode === "front" || sideArm === "right")) {
             rightAngle = this.calculateAngle(rightShoulder!, rightElbow!, rightWrist!);
 
-            // FIXED: Prüfe auf Überlappung von Wrist und Elbow
             const isOverlapping = this.isWristAndElbowOverlapping(rightWrist!, rightElbow!, rightShoulder!);
 
-            // Nur Fehler anzeigen wenn keine Überlappung besteht
             if (!isOverlapping) {
-                const bodyWidthRight = Math.abs(rightShoulder!.x - rightHip!.x);
-                const elbowDistanceRight = Math.abs(rightElbow!.x - rightShoulder!.x);
-                const elbowTooFarRight = elbowDistanceRight > bodyWidthRight * 1.35;
                 const rightWristTooFarUp = rightAngle < 25;
-                const rightAngleTooWide = rightAngle > 175;
 
-                let rightElbowTooFarForward = false;
                 if (viewMode === "side") {
                     const shoulderX = rightShoulder!.x;
                     const elbowX = rightElbow!.x;
                     const forwardDistance = Math.abs(elbowX - shoulderX);
-                    rightElbowTooFarForward = forwardDistance > 50;
+                    rightElbowForwardError = forwardDistance > 50;
+                    if (rightElbowForwardError) {
+                        this.addTimedMessage("right", "Elbow too far forward");
+                        if (this.sessionActive) {
+                            this.sessionErrors.right.add("Elbow too far forward");
+                        }
+                    }
                 }
 
                 if (viewMode === "front") {
+                    const bodyWidthRight = Math.abs(rightShoulder!.x - rightHip!.x);
+                    const elbowDistanceRight = Math.abs(rightElbow!.x - rightShoulder!.x);
+                    const elbowTooFarRight = elbowDistanceRight > bodyWidthRight * 1.35;
+                    const rightAngleTooWide = rightAngle > 175;
+
                     this.pushMessages(
                         "right",
                         [
@@ -489,13 +621,10 @@ export class CurlTracker {
                         ],
                         ""
                     );
-                }
-
-                if (viewMode === "side") {
+                } else if (viewMode === "side") {
                     this.pushMessages(
                         "right",
                         [
-                            { condition: rightElbowTooFarForward, msg: "Elbow too far forward" },
                             { condition: rightWristTooFarUp, msg: "Wrist too far up" },
                         ],
                         ""
@@ -504,18 +633,17 @@ export class CurlTracker {
             }
         }
 
-        // FIXED: Aktuelle Feedback-Nachrichten abrufen (nicht abgelaufene)
-        // cleanupOldMessages wird in getCurrentFeedback aufgerufen
         const currentFeedback = this.getCurrentFeedback();
+
 
         return {
             feedback: currentFeedback,
             angles: { left: leftAngle, right: rightAngle },
             backSwingData,
+            elbowForwardErrors: { left: leftElbowForwardError, right: rightElbowForwardError },
         };
     }
 
-    // Reset rep states (z.B. bei Moduswechsel)
     resetRepStates(): void {
         this.repRef = {
             left: {
@@ -524,6 +652,7 @@ export class CurlTracker {
                 raiseStart: null,
                 lowerStart: null,
                 idleStart: null,
+                repCount: 0,
             },
             right: {
                 prev: null,
@@ -531,23 +660,39 @@ export class CurlTracker {
                 raiseStart: null,
                 lowerStart: null,
                 idleStart: null,
+                repCount: 0,
             },
         };
 
-        // Auch timed feedback zurücksetzen
         this.timedFeedback = {
             left: [],
             right: [],
             universal: [],
         };
+
+        this.sessionActive = false;
+        this.sessionStats = {
+            leftReps: 0,
+            rightReps: 0,
+            totalReps: 0,
+            repRecords: [],
+            sessionStartTime: null,
+            sessionEndTime: null,
+            leftErrors: [],
+            rightErrors: [],
+            universalErrors: [],
+        };
+        this.sessionErrors = {
+            left: new Set(),
+            right: new Set(),
+            universal: new Set(),
+        };
     }
 
-    // Get current feedback
     getFeedback(): ArmFeedback {
         return this.getCurrentFeedback();
     }
 
-    // Get side arm for side mode
     getSideArm(
         leftShoulder: Keypoint | undefined,
         leftElbow: Keypoint | undefined,
