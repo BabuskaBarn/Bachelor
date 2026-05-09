@@ -31,13 +31,19 @@ public ResponseEntity<Map<String, Object>> register(UserDto userDto){
     Map<String, Object> response = new HashMap<>();
 
     if(repository.existsByUsername(userDto.getUsername())){
-        response.put("succes", false);
+        response.put("success", false);
         response.put("message", "Username already exists");
         return ResponseEntity.status(HttpStatus.CONFLICT).body(response);
     }
 
-    AppUser user =new AppUser(userDto.getUsername(), passwordEncoder.encode(userDto.getPassword()));
-    AppUser appuser= repository.save(user);
+    String encodedPassword = passwordEncoder.encode(userDto.getPassword());
+    AppUser user = new AppUser(userDto.getUsername(), encodedPassword);
+    AppUser savedUser = repository.save(user);
+
+    response.put("success", true);
+    response.put("userId", savedUser.getId());
+    response.put("username", savedUser.getUsername());
+    response.put("message", "Registration successful");
 
     return ResponseEntity.ok(response);
 }
@@ -48,7 +54,7 @@ public ResponseEntity<Map<String, Object>> login(UserDto userDto){
 
     AppUser user = repository.findByUsername(userDto.getUsername()).orElse(null);
 
-    if(user==null || passwordEncoder.matches(userDto.getPassword(), user.getPassword())) {
+    if(user==null || !passwordEncoder.matches(userDto.getPassword(), user.getPassword())) {
         response.put("success", false);
         response.put("message", "Invalid credentials");
         return ResponseEntity.status(HttpStatus.CONFLICT).body(response);

@@ -1,4 +1,3 @@
-// CurlTracker.ts - KORRIGIERTE VERSION mit elbowForwardErrors im Return Type
 import type { Keypoint } from "@tensorflow-models/pose-detection";
 
 export type ViewMode = "front" | "side";
@@ -38,7 +37,13 @@ export interface SessionStats {
     universalErrors: string[];
 }
 
-export const Min_Score = 0.25;
+export interface ErrorClip{
+    error: "string";
+    arm?: "left"|"right";
+    timestamp: number;
+}
+
+export const Min_Score = 0.35;
 
 interface TimedMessage {
     message: string;
@@ -110,6 +115,8 @@ export class CurlTracker {
         right: new Set(),
         universal: new Set(),
     };
+
+    private errorTimestamps: ErrorClip[]=[];
 
     calculateAngle(a: Keypoint, b: Keypoint, c: Keypoint): number {
         const radians =
@@ -209,7 +216,7 @@ export class CurlTracker {
             lowerTime = rep.lowerStart ? (now - rep.lowerStart) / 1000 : 0;
             raiseTime = rep.raiseStart ? (rep.lowerStart! - rep.raiseStart) / 1000 : 0;
 
-            if (lowerTime < raiseTime * 1.75) {
+            if (lowerTime < raiseTime * 1.2) {
                 errors.push(`Lowering too fast (${lowerTime.toFixed(2)}s / ${raiseTime.toFixed(2)}s)`);
                 this.addSessionError(arm, `Lowering too fast (${lowerTime.toFixed(2)}s / ${raiseTime.toFixed(2)}s)`);
             }
@@ -225,6 +232,12 @@ export class CurlTracker {
     private addSessionError(arm: "left" | "right", error: string): void {
         if (!this.sessionActive) return;
 
+        this.errorTimestamps.push({
+            error,
+            arm,
+            timestamp: Date.now()
+        });
+
         if (arm === "left") {
             this.sessionErrors.left.add(error);
         } else {
@@ -234,6 +247,12 @@ export class CurlTracker {
 
     addUniversalSessionError(error: string): void {
         if (!this.sessionActive) return;
+
+        this.errorTimestamps.push({
+            error,
+            timestamp: Date.now()
+        });
+
         this.sessionErrors.universal.add(error);
     }
 
@@ -369,6 +388,8 @@ export class CurlTracker {
 
         this.repRef.left.repCount = 0;
         this.repRef.right.repCount = 0;
+
+        this.errorTimestamps=[];
     }
 
     endSession(): SessionStats {
@@ -406,7 +427,73 @@ export class CurlTracker {
         };
     }
 
-    // 🔴 WICHTIG: Hier ist der korrigierte Return Type mit elbowForwardErrors
+    getErrorClips(): Array<{
+        error: string;
+        arm?: "left" | "right";
+        startTime: number;
+        endTime: number;
+        timestamp: number;
+    }> {
+        if (!this.sessionStats.sessionStartTime) return [];
+
+        const clips: Array<{
+            error: string;
+            arm?: "left" | "right";
+            startTime: number;
+            endTime: number;
+            timestamp: number;
+        }> = [];
+
+        const processed = new Set<number>();
+
+        for (let i = 0; i < this.errorTimestamps.length; i++) {
+            if (processed.has(i)) continue;
+
+            const error = this.errorTimestamps[i];
+            const sessionTime = error.timestamp - this.sessionStats.sessionStartTime;
+
+            // Start 2 seconds before error, end 3 seconds after
+            let startTime = Math.max(0, sessionTime - 2000);
+            let endTime = sessionTime + 3000;
+            let latestTimestamp = error.timestamp;
+
+            // Merge with nearby errors of the same type (within 5 seconds)
+            for (let j = i + 1; j < this.errorTimestamps.length; j++) {
+                const other = this.errorTimestamps[j];
+                const otherSessionTime = other.timestamp - this.sessionStats.sessionStartTime!;
+
+                if (other.error === error.error &&
+                    other.arm === error.arm &&
+                    otherSessionTime < endTime + 5000) {
+                    endTime = Math.max(endTime, otherSessionTime + 3000);
+                    latestTimestamp = Math.max(latestTimestamp, other.timestamp);
+                    processed.add(j);
+                }
+            }
+
+            clips.push({
+                error: error.error,
+                arm: error.arm,
+                startTime,
+                endTime,
+                timestamp: latestTimestamp
+            });
+
+            processed.add(i);
+        }
+
+        return clips;
+    }
+
+
+    getErrorTimestamps(): ErrorClip[] {
+        return [...this.errorTimestamps];
+    }
+
+    resetErrorTimestamps():void{
+    this.errorTimestamps=[];}
+
+
     analyzePose(
         pose: { keypoints: Keypoint[] },
         viewMode: ViewMode,
@@ -415,7 +502,7 @@ export class CurlTracker {
         feedback: ArmFeedback;
         angles: { left: number | null; right: number | null };
         backSwingData: { hasBackSwing: boolean; centerLine: { start: { x: number; y: number }; end: { x: number; y: number } } | null };
-        elbowForwardErrors: { left: boolean; right: boolean };  // 🔴 FIXED: Hier war der Fehler!
+        elbowForwardErrors: { left: boolean; right: boolean };
     } {
         const leftShoulder = this.getStablePoint(
             pose.keypoints.find((k) => k.name === "left_shoulder")
@@ -542,7 +629,7 @@ export class CurlTracker {
             const isOverlapping = this.isWristAndElbowOverlapping(leftWrist!, leftElbow!, leftShoulder!);
 
             if (!isOverlapping) {
-                const leftWristTooFarUp = leftAngle < 25;
+                const leftWristTooFarUp = leftAngle < 35;
 
                 if (viewMode === "side") {
                     const shoulderX = leftShoulder!.x;
@@ -550,9 +637,9 @@ export class CurlTracker {
                     const forwardDistance = Math.abs(elbowX - shoulderX);
                     leftElbowForwardError = forwardDistance > 50;
                     if (leftElbowForwardError) {
-                        this.addTimedMessage("left", "Elbow too far forward");
+                        this.addTimedMessage("left", "Elbow too far forward or backwards");
                         if (this.sessionActive) {
-                            this.sessionErrors.left.add("Elbow too far forward");
+                            this.sessionErrors.left.add("Elbow too far forward or backwards");
                         }
                     }
                 }
@@ -561,14 +648,14 @@ export class CurlTracker {
                     const bodyWidthLeft = Math.abs(leftShoulder!.x - leftHip!.x);
                     const elbowDistanceLeft = Math.abs(leftElbow!.x - leftShoulder!.x);
                     const elbowTooFarLeft = elbowDistanceLeft > bodyWidthLeft * 1.35;
-                    const leftAngleTooWide = leftAngle > 175;
+
 
                     this.pushMessages(
                         "left",
                         [
                             { condition: leftWristTooFarUp, msg: "Wrist too far up" },
                             { condition: elbowTooFarLeft, msg: "Elbow too far out" },
-                            { condition: leftAngleTooWide, msg: "Arm not straight enough" },
+
                         ],
                         ""
                     );
@@ -591,7 +678,7 @@ export class CurlTracker {
             const isOverlapping = this.isWristAndElbowOverlapping(rightWrist!, rightElbow!, rightShoulder!);
 
             if (!isOverlapping) {
-                const rightWristTooFarUp = rightAngle < 25;
+                const rightWristTooFarUp = rightAngle < 35;
 
                 if (viewMode === "side") {
                     const shoulderX = rightShoulder!.x;
@@ -599,9 +686,9 @@ export class CurlTracker {
                     const forwardDistance = Math.abs(elbowX - shoulderX);
                     rightElbowForwardError = forwardDistance > 50;
                     if (rightElbowForwardError) {
-                        this.addTimedMessage("right", "Elbow too far forward");
+                        this.addTimedMessage("right", "Elbow too far forward or backwards");
                         if (this.sessionActive) {
-                            this.sessionErrors.right.add("Elbow too far forward");
+                            this.sessionErrors.right.add("Elbow too far forward or backwards");
                         }
                     }
                 }
@@ -610,14 +697,14 @@ export class CurlTracker {
                     const bodyWidthRight = Math.abs(rightShoulder!.x - rightHip!.x);
                     const elbowDistanceRight = Math.abs(rightElbow!.x - rightShoulder!.x);
                     const elbowTooFarRight = elbowDistanceRight > bodyWidthRight * 1.35;
-                    const rightAngleTooWide = rightAngle > 175;
+
 
                     this.pushMessages(
                         "right",
                         [
                             { condition: rightWristTooFarUp, msg: "Wrist too far up" },
                             { condition: elbowTooFarRight, msg: "Elbow too far out" },
-                            { condition: rightAngleTooWide, msg: "Arm not straight enough" },
+
                         ],
                         ""
                     );
@@ -687,6 +774,7 @@ export class CurlTracker {
             right: new Set(),
             universal: new Set(),
         };
+        this.errorTimestamps=[];
     }
 
     getFeedback(): ArmFeedback {

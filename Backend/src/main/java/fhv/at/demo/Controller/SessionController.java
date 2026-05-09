@@ -11,11 +11,11 @@ import java.util.Map;
 import java.util.UUID;
 
 @RestController
-@RequestMapping("/api/session")
+@RequestMapping("/api/sessions")
 @CrossOrigin(origins = "*")
 @RequiredArgsConstructor
 public class SessionController {
-    private TrainingSessionService service;
+    private final TrainingSessionService service;
 
 
     @PostMapping
@@ -37,15 +37,12 @@ public class SessionController {
 
 
     @GetMapping("/user/{userId}/latest-with-comparison")
-    public ResponseEntity<Map<String, Object>> compareLastThreeSessions(@PathVariable UUID userId) {
-        return service.getLatestSessionWithComparison(userId);
+    public ResponseEntity<Map<String, Object>> feedback(@PathVariable UUID userId) {
+        return service.feedback(userId);
     }
 
 
 
 
-    @GetMapping("/user/{userId}/progress")
-    public ResponseEntity<Map<String, Object>> getUserProgress(@PathVariable UUID userId) {
-        return service.getUserProgress(userId);
-    }
+
 }

@@ -663,7 +663,7 @@ const CameraFeed = () => {
                     }}
                 >
                     {armFeedback.universal.map((m, i) => (
-                        <div key={i}>⚠️ {m}</div>
+                        <div key={i}>️ {m}</div>
                     ))}
                 </div>
             )}

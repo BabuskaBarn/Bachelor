@@ -1,7 +1,18 @@
 import { useNavigate } from "react-router-dom";
+import { useState } from "react";
 
 const HomePage = () => {
     const navigate = useNavigate();
+    const [exercise, setExercise] = useState("");
+
+    const handleSelect = (e) => {
+        const value = e.target.value;
+        setExercise(value);
+
+        if (value === "curls") {
+            navigate("/curls");
+        }
+    };
 
     return (
         <div
@@ -11,29 +22,51 @@ const HomePage = () => {
                 justifyContent: "center",
                 alignItems: "center",
                 height: "100vh",
+                width: "100vw",
                 backgroundColor: "#111",
                 color: "white",
+                margin: 0,
+                padding: 0,
+                position: "relative",
             }}
         >
-            <h1>Willkommen zur Pose Detection App</h1>
-            <p>Hier kannst du deine Armcurls analysieren.</p>
-
+            {/* Progress Button (updated) */}
             <button
-                onClick={() => navigate("/curls")}
+                onClick={() => navigate("/progress")}
                 style={{
-                    marginTop: 20,
-                    padding: "12px 24px",
-                    fontSize: 18,
+                    position: "absolute",
+                    top: "20px",
+                    right: "20px",
+                    padding: "12px 40px", // wider
+                    fontSize: "16px",
                     cursor: "pointer",
-                    borderRadius: 8,
-                    backgroundColor: "lime",
-                    color: "#111",
+                    borderRadius: "8px",
+                    backgroundColor: "#ccc", // grey
+                    color: "black", // black text
                     fontWeight: "bold",
                     border: "none",
+                    zIndex: 10,
                 }}
             >
-                Curls starten
+                Progress
             </button>
+
+            {/* New Header + Dropdown */}
+            <h1 style={{ marginBottom: "20px" }}>Exercises</h1>
+
+            <select
+                value={exercise}
+                onChange={handleSelect}
+                style={{
+                    padding: "12px 20px",
+                    fontSize: "16px",
+                    borderRadius: "8px",
+                    cursor: "pointer",
+                }}
+            >
+                <option value="">Select Exercise</option>
+                <option value="curls">Curls</option>
+            </select>
         </div>
     );
 };

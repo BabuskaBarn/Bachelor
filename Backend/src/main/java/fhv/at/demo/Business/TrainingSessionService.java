@@ -14,6 +14,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -50,12 +51,12 @@ public class TrainingSessionService {
 
             // 4. TrainingSession erstellen und alle Felder setzen
             TrainingSession session = new TrainingSession();
-            session.setUser(user);                                    // ← Setzt den User
-            session.setSessionData(sessionDataJson);                  // ← Setzt das komplette JSON
-            session.setLeftReps(sessionData.getLeftReps());           // ← Setzt leftReps
-            session.setRightReps(sessionData.getRightReps());         // ← Setzt rightReps
-            session.setTotalReps(sessionData.getTotalReps());         // ← Setzt totalReps
-            session.setDuration(sessionData.getDuration());           // ← Setzt duration
+            session.setUser(user);                                    //  Setzt den User
+            session.setSessionData(sessionDataJson);                  //  Setzt das komplette JSON
+            session.setLeftReps(sessionData.getLeftReps());           //  Setzt leftReps
+            session.setRightReps(sessionData.getRightReps());         //  Setzt rightReps
+            session.setTotalReps(sessionData.getTotalReps());         //  Setzt totalReps
+            session.setDuration(sessionData.getDuration());           //  Setzt duration
             // createdAt wird automatisch durch @PrePersist gesetzt
 
             // 5. Speichern
@@ -166,5 +167,117 @@ public class TrainingSessionService {
             response.put("message", "Failed to retrieve session: " + e.getMessage());
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(response);
         }
+    }
+
+
+    @Transactional
+    public ResponseEntity<Map<String, Object>> feedback(UUID userId) {
+        Map<String, Object> response = new HashMap<>();
+
+        try {
+            List<TrainingSession> sessions = sessionRepository.findByUserIdOrderByCreatedAtDesc(userId);
+
+            if (sessions.isEmpty()) {
+                response.put("success", "false");
+                response.put("message", "No workouts found");
+                return ResponseEntity.ok(response);
+
+            }
+
+            TrainingSession latest = sessions.get(0);
+            SessionDto latestData = objectMapper.readValue(latest.getSessionData(), SessionDto.class);
+            int latestErrors = countErrors(latestData);
+
+            if (sessions.size() == 1) {
+                response.put("success", true);
+                response.put("hasComparison", false);
+                response.put("currentSession", Map.of(
+                        "id", latest.getId(),
+                        "date", latest.getCreatedAt().format(DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm")),
+                        "reps", latestData.getTotalReps(),
+                        "leftReps", latestData.getLeftReps(),
+                        "rightReps", latestData.getRightReps(),
+                        "errors", latestErrors,
+                        "duration", latestData.getDuration()
+                ));
+                return ResponseEntity.ok(response);
+            }
+
+            TrainingSession previous = sessions.get(1);
+            SessionDto previousData = objectMapper.readValue(previous.getSessionData(), SessionDto.class);
+            int previousErrors = countErrors(previousData);
+
+            // Einfacher Vergleich
+            Map<String, Object> comparison = new HashMap<>();
+
+            // Reps Vergleich
+            int repsDiff = latestData.getTotalReps() - previousData.getTotalReps();
+            comparison.put("repsDifference", repsDiff);
+            comparison.put("repsTrend", repsDiff > 0 ? "UP" : (repsDiff < 0 ? "DOWN" : "SAME"));
+
+            // Errors Vergleich
+            int errorsDiff = latestErrors - previousErrors;
+            comparison.put("errorsDifference", errorsDiff);
+            comparison.put("errorsTrend", errorsDiff < 0 ? "BETTER" : (errorsDiff > 0 ? "WORSE" : "SAME"));
+
+            // Duration Vergleich
+            double durationDiff = latestData.getDuration() - previousData.getDuration();
+            comparison.put("durationDifference", durationDiff);
+            comparison.put("durationTrend", durationDiff < 0 ? "FASTER" : (durationDiff > 0 ? "SLOWER" : "SAME"));
+
+            // Simple Nachricht
+            String message;
+            if (repsDiff > 0 && errorsDiff < 0) {
+                message = "Great! More reps AND fewer errors!";
+            } else if (repsDiff > 0) {
+                message = "Good job! +" + repsDiff + " reps!";
+            } else if (errorsDiff < 0) {
+                message = "Nice! -" + Math.abs(errorsDiff) + " errors!";
+            } else if (repsDiff < 0) {
+                message = Math.abs(repsDiff) + " fewer reps. Keep going!";
+            } else {
+                message = "Consistent! Try to push harder!";
+            }
+            comparison.put("message", message);
+
+            // Session Daten
+            comparison.put("latest", Map.of(
+                    "date", latest.getCreatedAt().format(DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm")),
+                    "reps", latestData.getTotalReps(),
+                    "leftReps", latestData.getLeftReps(),
+                    "rightReps", latestData.getRightReps(),
+                    "errors", latestErrors,
+                    "duration", latestData.getDuration()
+            ));
+
+            comparison.put("previous", Map.of(
+                    "date", previous.getCreatedAt().format(DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm")),
+                    "reps", previousData.getTotalReps(),
+                    "leftReps", previousData.getLeftReps(),
+                    "rightReps", previousData.getRightReps(),
+                    "errors", previousErrors,
+                    "duration", previousData.getDuration()
+            ));
+
+            response.put("success", true);
+            response.put("hasComparison", true);
+            response.put("comparison", comparison);
+            return ResponseEntity.ok(response);
+
+        } catch (Exception e) {
+            e.printStackTrace();
+            response.put("success", false);
+            response.put("message", "Error: " + e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(response);
+        }
+    }
+
+    private int countErrors(SessionDto data) {
+        if (data.getErrors() == null) return 0;
+        int count = 0;
+        if (data.getErrors().get("left") != null) count += data.getErrors().get("left").size();
+        if (data.getErrors().get("right") != null) count += data.getErrors().get("right").size();
+        if (data.getErrors().get("universal") != null) count += data.getErrors().get("universal").size();
+        return count;
     }
 }
