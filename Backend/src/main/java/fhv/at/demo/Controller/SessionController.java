@@ -36,7 +36,7 @@ public class SessionController {
     }
 
 
-    @GetMapping("/user/{userId}/latest-with-comparison")
+    @GetMapping("/user/{userId}/feedback")
     public ResponseEntity<Map<String, Object>> feedback(@PathVariable UUID userId) {
         return service.feedback(userId);
     }
